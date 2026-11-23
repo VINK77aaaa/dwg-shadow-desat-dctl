@@ -161,14 +161,13 @@ def dctl_transform(
     t_shaped = np.where(t > np.float32(0.0), np.power(t, np.float32(rolloff_curve)), np.float32(0.0))
     w_shadow = smooth3(t_shaped)
 
-    # 4. Warm / Skin protect
+    # 4. Warm / Skin protect (Lorentzian chroma-regularized raised-cosine bell, sigma_c = 0.018)
     cos48 = np.float32(0.66913061)
     sin48 = np.float32(0.74314483)
-    c_lab = np.sqrt(lab[:, 1] * lab[:, 1] + lab[:, 2] * lab[:, 2])
-    c_safe = np.sqrt(lab[:, 1] * lab[:, 1] + lab[:, 2] * lab[:, 2] + np.float32(1e-8))
-    cos_diff = (lab[:, 1] * cos48 + lab[:, 2] * sin48) / c_safe
-    u_warm = np.clip((cos_diff - np.float32(0.25)) / np.float32(0.75), np.float32(0.0), np.float32(1.0))
-    warm_w = u_warm * u_warm * (np.float32(3.0) - np.float32(2.0) * u_warm)
+    c_sq = lab[:, 1] * lab[:, 1] + lab[:, 2] * lab[:, 2]
+    c_lab = np.sqrt(c_sq)
+    p_warm = np.maximum(lab[:, 1] * cos48 + lab[:, 2] * sin48, np.float32(0.0))
+    warm_w = (p_warm * p_warm) / (c_sq + np.float32(0.000324))
 
     w_eff = w_shadow * (np.float32(1.0) - np.float32(warm_protect) * warm_w)
     desat_amount = np.float32(desat_strength) * w_eff

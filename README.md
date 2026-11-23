@@ -68,9 +68,14 @@
   <img src="assets/rolloff_curves.svg" alt="Shadow Rolloff Curves in DI Domain" width="100%" />
 </p>
 
-### 2. OkLab `+48°` 暖调 / 肤色定向保护窗口
+### 2. OkLab `+48°` 暖调 / 肤色定向保护窗口（洛伦兹色度软核）
 
-在 OkLab $(a, b)$ 感知色度平面以 `+48°`（暖调肤色中心方向）构建 `smoothstep` 余弦保护窗（约 $\pm 75.5^\circ$ 柔和过渡），在全额压制冷绿/青蓝/品红彩噪的同时保留暗部暖调血气：
+在 OkLab $(a, b)$ 感知色度平面以 `+48°`（暖调肤色中心方向）构建**洛伦兹色度正则化余弦平方钟形窗**（Lorentzian-Regularized $\cos^2$ Field，正则尺度 $\sigma_C = 0.018$）：
+
+$$w_{\text{warm}} = \frac{\max(a \cos 48^\circ + b \sin 48^\circ,\ 0)^2}{a^2 + b^2 + \sigma_C^2} \quad (\sigma_C = 0.018)$$
+
+- **低色度自动退避**：极低色度的黑发、近中性阴影及视频压缩块不会因微弱色相角抖动触发保护跳变，始终保持常态压噪；
+- **零平顶连续过渡**：消除固定角度阈值造成的等高线裁切硬边，在全额压制冷绿/青蓝/品红彩噪的同时，让暗部暖调血气随色度柔和渐入。
 
 <p align="center">
   <img src="assets/warm_skin_polar.svg" alt="Warm Skin Protect Polar Response" width="100%" />
@@ -121,13 +126,14 @@ flowchart LR
 | **4. Black Floor** | **极暗满额阈值** | `0.08` (`0.00 ~ 0.35`) | 低于此阈值的极暗底噪区吃满 `Desat Strength` 设定的最大力度；`Black Floor` 与 `Shadow Pivot` 之间平滑过渡。 |
 | **5. Rolloff Curve** | **衰减曲线形态** | `1.00` (`0.40 ~ 2.20`) | 控制过渡区的缓急：<br>`< 1.0` = 靠向中间调早早开始温柔滚落（胶片感）；<br>`> 1.0` = 紧贴极暗区收拢陡降（专注压底噪，少动次暗部）。 |
 | **6. Chroma Density** | **色彩密度 / 亮暗补偿** | `-0.08` (`-0.50 ~ +0.30`) | **仅对有色像素生效，中性灰阶（$R=G=B$）绝对 0 变化**：<br>• **负值（如 `-0.08 ~ -0.20`）**：模仿胶片减色法密度感，让暗部绿/品红彩噪在消色的同时温和下沉融入黑位，避免“亮白麻点”；<br>• **正值（如 `+0.05 ~ +0.15`）**：补偿高饱和色彩去色后的 HK 视觉变暗感。 |
-| **7. Warm Skin Protect** | **暗部暖调 / 肤色保护** | `0.00` (`0.00 ~ 1.00`) | 保护阴影中的红-橙-黄暖调（特别是背光面肤色、烛光/霓虹暖光）不被抽成死灰，同时对冷绿、青蓝、品红彩噪保持全额压制。 |
+| **7. Warm Skin Protect** | **暗部暖调 / 肤色保护** | `0.00` (`0.00 ~ 1.00`) | 保护阴影中的红-橙-黄暖调（特别是背光面肤色、烛光/霓虹暖光）不被抽成死灰，同时对冷绿、青蓝、品红彩噪保持全额压制。<br>采用**洛伦兹色度正则化余弦平方钟形窗**（`+48°`，$\sigma_C = 0.018$）：极低色度的黑发与暗部噪块平滑退出保护，暗部肤色随色度柔和渐入且无高数值裁切感。 |
 | **8. Preview - Set Off for LUT** | **预览模式** | `Off - LUT Safe` | **`Off - LUT Safe`**：正常画面输出（导出 LUT 前务必切回此项）；<br>**`Highlight`**：类似达芬奇限定器 `Shift+H` 高亮显示——选中的暗部保留显示处理后画面，未受影响的中灰/高光及被 `Warm Skin Protect` 保护的暖调肤色压成 18% 中灰（`0.336`），直观核查实际选区范围；<br>**`Shadow Mask`**：黑白权重遮罩（越白代表消色力度越大）；<br>**`Desat Delta 4x`**：4 倍放大显示被消除掉的色彩/噪点差值，便于检查是否误伤正常色彩。 |
 
 ### 💡 滑块联动与预览模式使用贴士
 
 1. **33 点 LUT 最小过渡跨度防呆保护**：为防止将 `Shadow Pivot` 与 `Black Floor` 拉得过近导致导出 33 点或 65 点 LUT 时跨格漏采出现断层，插件内置了 `0.085 ~ 0.14`（随 `Rolloff Curve` 动态适配）的最小过渡跨度保护。当两者间距小于该安全跨度时，插件会**优先锁定 `Shadow Pivot` 不变**，并自动将实际生效的 `Black Floor` 下推到 `Shadow Pivot - min_span`（此时在上限附近微调 `Black Floor` 若画面无变化属于正常防断层保护）。
 2. **`Highlight` 与 `Shadow Mask` 的分工**：`Highlight` 预览的是选区权重（即使 `Desat Strength = 0.0` 也能用来框选并检查 `Shadow Pivot` / `Black Floor` / `Warm Skin Protect` 的作用范围）；而 `Shadow Mask` 预览的是最终实际施加的消色力度（随 `Desat Strength` 缩放）。
+3. **`Warm Skin Protect` 的平滑过渡特性**：即使将 `Warm Skin Protect` 拉高至 `0.80 ~ 1.00`，近中性灰的低色度区域（如黑发发丝、暗影底噪）也不会因微弱偏色发生角度撕裂，而在暗部肤色交界处会随色度连续羽化，避免 `Shadow Mask` 出现锯齿或等高线硬边。
 
 ---
 
@@ -192,3 +198,12 @@ dwg-shadow-desat-dctl/
     ├── generate_test_chart.py             # 16-bit 测试卡生成脚本
     └── preview_rec709.png                 # 测试卡 Rec.709 模拟预览图
 ```
+
+---
+
+## 📝 更新日志
+
+### 2026-11-23 — `Warm Skin Protect` 洛伦兹软核算法升级
+- **消除高数值下的硬边裁切感**：将 [DWG_Shadow_Desat.dctl](DWG_Shadow_Desat.dctl) 中的暖肤色保护权重重构为 **洛伦兹色度正则化余弦平方钟形窗**（Lorentzian-Regularized $\cos^2$ Field，OkLab `+48°` 轴，$\sigma_C = 0.018$）。
+- **消除低色度暗部边缘撕裂**：黑发、近中性阴影及视频压缩块等极低色度区域平滑退出保护，不再因微弱色相角抖动触发跳变；中高色度暗部肤色交界处呈现连续羽化渐变，保留立体层次。
+- **文档与可视化同步**：同步更新 [`tests/verify_dctl.py`](tests/verify_dctl.py)、[`assets/warm_skin_polar.svg`](assets/warm_skin_polar.svg) 极坐标响应图、[`assets/comparison_rec709.png`](assets/comparison_rec709.png) 四宫格实测对比图及本 README，全部 9 项自动化回归测试均已通过。

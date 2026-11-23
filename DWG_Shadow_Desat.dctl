@@ -162,13 +162,15 @@ __DEVICE__ float3 transform(int p_Width, int p_Height, int p_X, int p_Y, float p
     float w_shadow = smooth3(t_shaped);
 
     // 4. Warm / Skin hue protection centered at +48 deg in OkLab (a, b) plane
+    // Lorentzian chroma-regularized raised-cosine bell (sigma_c = 0.018):
+    // smoothly fades out protection on low-chroma dark hair/shadows to prevent angle tearing,
+    // and eliminates flat-top clipping contours.
     const float cos48 = 0.66913061f;
     const float sin48 = 0.74314483f;
-    float C_lab = _sqrtf(lab.y * lab.y + lab.z * lab.z);
-    float C_safe = _sqrtf(lab.y * lab.y + lab.z * lab.z + 1e-8f);
-    float cos_diff = (lab.y * cos48 + lab.z * sin48) / C_safe;
-    float u_warm = clampf((cos_diff - 0.25f) / 0.75f, 0.0f, 1.0f);
-    float warm_w = u_warm * u_warm * (3.0f - 2.0f * u_warm);
+    float C_sq = lab.y * lab.y + lab.z * lab.z;
+    float C_lab = _sqrtf(C_sq);
+    float p_warm = _fmaxf(lab.y * cos48 + lab.z * sin48, 0.0f);
+    float warm_w = (p_warm * p_warm) / (C_sq + 0.000324f);
 
     float w_eff = w_shadow * (1.0f - warm_protect * warm_w);
     float desat_amount = desat_strength * w_eff;
