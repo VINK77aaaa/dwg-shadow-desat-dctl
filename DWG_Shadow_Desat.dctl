@@ -1,7 +1,8 @@
 // DWG_Shadow_Desat.dctl
 // Specialized shadow desaturation DCTL for DaVinci Wide Gamut / DaVinci Intermediate (DWG/DI).
-// Designed for clean chroma-noise suppression and film-like shadow saturation rolloff,
-// with strict neutral-gray invariance, C2 smoothness, and 3D LUT export safety.
+// Uses a strictly positive monotonic L2 shadow mask, a positive-definite Blue-Inset OkLab engine,
+// rational C2 smooth5 rolloff, and luma-invariant warm skin protection.
+// Hardened for macOS Apple Silicon (Metal Shading Language) fast-math safety and SIMD early-out.
 
 // clang-format off
 DEFINE_UI_PARAMS(desat_engine, Desat Engine, DCTLUI_COMBO_BOX, 0, {ENGINE_OKLAB, ENGINE_LINEAR}, {Perceptual OkLab, Linear Luma})
@@ -25,8 +26,8 @@ __DEVICE__ float clampf(float x, float lo, float hi) {
     return _fminf(_fmaxf(x, lo), hi);
 }
 
-__DEVICE__ float3 sub3(float3 a, float3 b) {
-    return make_float3(a.x - b.x, a.y - b.y, a.z - b.z);
+__DEVICE__ float3 add3(float3 a, float3 b) {
+    return make_float3(a.x + b.x, a.y + b.y, a.z + b.z);
 }
 
 __DEVICE__ float3 scale3(float3 v, float s) {
@@ -41,6 +42,19 @@ __DEVICE__ float3 lerp3(float3 a, float3 b, float t) {
     );
 }
 
+// Metal -ffast-math safe transcendental wrappers (immune to ternary speculative evaluation NaN)
+__DEVICE__ float sqrtf_safe(float x) {
+    return (x <= 0.0f) ? 0.0f : _sqrtf(_fmaxf(x, 1e-30f));
+}
+
+__DEVICE__ float cbrtf_pos(float x) {
+    return (x <= 0.0f) ? 0.0f : _powf(_fmaxf(x, 1e-20f), 1.0f / 3.0f);
+}
+
+__DEVICE__ float powf_pos(float x, float e) {
+    return (x <= 0.0f) ? 0.0f : _powf(_fmaxf(x, 1e-20f), e);
+}
+
 __DEVICE__ float di_to_linear(float y) {
     if (y <= DI_LOG_CUT) {
         return y / DI_M;
@@ -49,10 +63,11 @@ __DEVICE__ float di_to_linear(float y) {
 }
 
 __DEVICE__ float linear_to_di(float x) {
+    float safe_arg = _fmaxf(x + DI_A, 1e-12f);
     if (x <= DI_LIN_CUT) {
         return x * DI_M;
     }
-    return (_log2f(x + DI_A) + DI_B) * DI_C;
+    return (_log2f(safe_arg) + DI_B) * DI_C;
 }
 
 __DEVICE__ float3 di_to_linear3(float3 v) {
@@ -63,49 +78,26 @@ __DEVICE__ float3 linear_to_di3(float3 v) {
     return make_float3(linear_to_di(v.x), linear_to_di(v.y), linear_to_di(v.z));
 }
 
-__DEVICE__ float smax_c2(float a, float b, float k) {
-    if (k <= 1e-8f) {
-        return _fmaxf(a, b);
-    }
-    float h = _fmaxf(k - _fabs(a - b), 0.0f) / k;
-    return _fmaxf(a, b) + h * h * h * k * (1.0f / 6.0f);
-}
-
-__DEVICE__ float smooth3(float t) {
-    float x = clampf(t, 0.0f, 1.0f);
-    return x * x * (3.0f - 2.0f * x);
-}
-
+// Quintic Hermite step: strictly C2 continuous with zero 1st & 2nd derivatives at endpoints
 __DEVICE__ float smooth5(float t) {
     float x = clampf(t, 0.0f, 1.0f);
     return x * x * x * (x * (x * 6.0f - 15.0f) + 10.0f);
 }
 
-__DEVICE__ float smoothstep_c2(float edge0, float edge1, float x) {
-    float t = clampf((x - edge0) / (edge1 - edge0), 0.0f, 1.0f);
-    return smooth5(t);
-}
-
-__DEVICE__ float cbrtf_safe(float x) {
-    if (x == 0.0f) {
-        return 0.0f;
-    }
-    float mag = _powf(_fabs(x), 1.0f / 3.0f);
-    return (x < 0.0f) ? -mag : mag;
-}
-
-__DEVICE__ float3 dwg_lin_to_lms(float3 c) {
+// Positive-definite Blue-Inset (aB = 0.32) D65-normalized DWG <-> OkLab LMS matrices
+// All 9 forward weights > +0.013; row sums strictly = 1.0 for exact neutral-gray invariance.
+__DEVICE__ float3 dwg_lin_to_lms_safe(float3 c) {
     return make_float3(
-        0.68578439f * c.x + 0.45579386f * c.y - 0.14157825f * c.z,
-        0.27426684f * c.x + 0.81177760f * c.y - 0.08604444f * c.z,
-        0.04348923f * c.x + 0.15065235f * c.y + 0.80585842f * c.z
+        0.59279668f * c.x + 0.39399130f * c.y + 0.01321202f * c.z,
+        0.23707812f * c.x + 0.70170606f * c.y + 0.06121582f * c.z,
+        0.03759238f * c.x + 0.13022491f * c.y + 0.83218271f * c.z
     );
 }
 
-__DEVICE__ float3 lms_to_dwg_lin(float3 lms) {
+__DEVICE__ float3 lms_safe_to_dwg_lin(float3 lms) {
     return make_float3(
-        1.88341962f * lms.x - 1.09716253f * lms.y + 0.21374291f * lms.z,
-       -0.63453134f * lms.x + 1.57756719f * lms.y + 0.05696415f * lms.z,
+        2.17619412f * lms.x - 1.23229223f * lms.y + 0.05609811f * lms.z,
+       -0.73672953f * lms.x + 1.86200294f * lms.y - 0.12527341f * lms.z,
         0.01698210f * lms.x - 0.23571070f * lms.y + 1.21872859f * lms.z
     );
 }
@@ -121,8 +113,8 @@ __DEVICE__ float3 lms_cbrt_to_lab(float3 lms_) {
 __DEVICE__ float3 lab_to_lms_cbrt(float3 lab) {
     return make_float3(
         1.00000000f * lab.x + 0.39633779f * lab.y + 0.21580376f * lab.z,
-        1.00000001f * lab.x - 0.10556134f * lab.y - 0.06385417f * lab.z,
-        1.00000005f * lab.x - 0.08948418f * lab.y - 1.29148554f * lab.z
+        1.00000000f * lab.x - 0.10556134f * lab.y - 0.06385417f * lab.z,
+        1.00000000f * lab.x - 0.08948418f * lab.y - 1.29148554f * lab.z
     );
 }
 
@@ -134,88 +126,109 @@ __DEVICE__ float3 transform(int p_Width, int p_Height, int p_X, int p_Y, float p
     float3 in_di = make_float3(p_R, p_G, p_B);
     float3 lin = di_to_linear3(in_di);
 
-    // 1. Safe-Y luminance calculation (eliminates DWG negative blue-weight black holes)
-    float Y_cie = 0.27411851f * lin.x + 0.87363190f * lin.y - 0.14775041f * lin.z;
-    float3 rgb_pos = make_float3(_fmaxf(lin.x, 0.0f), _fmaxf(lin.y, 0.0f), _fmaxf(lin.z, 0.0f));
-    float Y_pos_floor = 0.03f * (0.25f * rgb_pos.x + 0.60f * rgb_pos.y + 0.15f * rgb_pos.z);
-    float k_smooth = 0.03f * (rgb_pos.x + rgb_pos.y + rgb_pos.z);
-    float Y_safe = _fmaxf(smax_c2(Y_cie, Y_pos_floor, k_smooth), 0.0f);
+    // Clamp UI inputs against manual entry beyond slider bounds
+    float strength_val = clampf(desat_strength, 0.0f, 1.0f);
+    float curve_val = clampf(rolloff_curve, 0.40f, 2.20f);
+    float warm_val = clampf(warm_protect, 0.0f, 1.0f);
+    float cd_val = clampf(chroma_density, -0.50f, 0.30f);
 
-    // 2. Convert linear DWG to D65-normalized OkLab & compute imaginary-gamut safety blend
-    float3 lms = dwg_lin_to_lms(lin);
-    float min_lms = _fminf(_fminf(lms.x, lms.y), lms.z);
-    float max_lms = _fmaxf(_fmaxf(lms.x, lms.y), lms.z);
-    float lms_ratio = min_lms / _fmaxf(max_lms, 1e-7f);
-    float oklab_valid = smoothstep_c2(-0.02f, 0.04f, lms_ratio);
+    // Non-negative / negative separation (safely absorbs negative excursions from upstream nodes)
+    float3 lin_pos = make_float3(_fmaxf(lin.x, 0.0f), _fmaxf(lin.y, 0.0f), _fmaxf(lin.z, 0.0f));
+    float3 lin_neg = make_float3(_fminf(lin.x, 0.0f), _fminf(lin.y, 0.0f), _fminf(lin.z, 0.0f));
 
-    float3 lms_cbrt = make_float3(cbrtf_safe(lms.x), cbrtf_safe(lms.y), cbrtf_safe(lms.z));
-    float3 lab = lms_cbrt_to_lab(lms_cbrt);
+    // 1. Strictly positive, strictly monotonic L2 perceptual mask metric
+    float y_mask = sqrtf_safe(
+        0.24f * lin_pos.x * lin_pos.x +
+        0.66f * lin_pos.y * lin_pos.y +
+        0.10f * lin_pos.z * lin_pos.z
+    );
+    float luma_di = linear_to_di(y_mask);
 
-    // 3. Shadow weight curve in DI code-value domain with dynamic 33-pt LUT span protection
-    float luma_di = linear_to_di(Y_safe);
-    float min_span = _fminf(0.085f * _fmaxf(rolloff_curve, 1.0f), 0.14f);
+    // 2. Shadow weight curve in DI code-value domain with dynamic 33-pt LUT span protection
+    // Rational Schlick shaping + quintic smooth5 guarantees C2 smoothness across [0.40, 2.20]
+    float min_span = _fminf(0.095f * _fmaxf(curve_val, 1.0f), 0.15f);
     float pivot_val = _fmaxf(shadow_pivot, min_span);
     float floor_val = _fmaxf(_fminf(black_floor, pivot_val - min_span), 0.0f);
 
     float t = clampf((pivot_val - luma_di) / (pivot_val - floor_val), 0.0f, 1.0f);
-    float t_shaped = (t > 0.0f) ? _powf(t, rolloff_curve) : 0.0f;
-    float w_shadow = smooth3(t_shaped);
+    float t_shaped = t / (t + curve_val * (1.0f - t));
+    float w_shadow = smooth5(t_shaped);
+
+    // Early-out for midtones/highlights above Shadow Pivot (skips cbrtf/matrices on Apple Silicon GPU)
+    float3 highlight_bg = make_float3(0.336043f, 0.336043f, 0.336043f);
+    if (w_shadow <= 0.0f) {
+        if (preview_mode == PREVIEW_HIGHLIGHT) {
+            return highlight_bg;
+        }
+        if (preview_mode == PREVIEW_MASK || preview_mode == PREVIEW_DELTA) {
+            return make_float3(0.0f, 0.0f, 0.0f);
+        }
+        return in_di;
+    }
+
+    // 3. Positive-definite Blue-Inset OkLab conversion (C_inf continuous everywhere)
+    float3 lms = dwg_lin_to_lms_safe(lin_pos);
+    float3 lms_cbrt = make_float3(cbrtf_pos(lms.x), cbrtf_pos(lms.y), cbrtf_pos(lms.z));
+    float3 lab = lms_cbrt_to_lab(lms_cbrt);
 
     // 4. Warm / Skin hue protection centered at +48 deg in OkLab (a, b) plane
-    // Lorentzian chroma-regularized raised-cosine bell (sigma_c = 0.018):
-    // smoothly fades out protection on low-chroma dark hair/shadows to prevent angle tearing,
-    // and eliminates flat-top clipping contours.
+    // Luma-invariant relative-chroma Lorentzian raised-cosine bell (sigma_r = sqrt(0.0030) ~= 0.0548)
     const float cos48 = 0.66913061f;
     const float sin48 = 0.74314483f;
     float C_sq = lab.y * lab.y + lab.z * lab.z;
-    float C_lab = _sqrtf(C_sq);
     float p_warm = _fmaxf(lab.y * cos48 + lab.z * sin48, 0.0f);
-    float warm_w = (p_warm * p_warm) / (C_sq + 0.000324f);
+    float sigma_sq = 0.0030f * lab.x * lab.x + 1e-8f;
+    float warm_w = (p_warm * p_warm) / (C_sq + sigma_sq);
 
-    float w_eff = w_shadow * (1.0f - warm_protect * warm_w);
-    float desat_amount = desat_strength * w_eff;
+    float w_eff = w_shadow * (1.0f - warm_val * warm_w);
+    float desat_amount = strength_val * w_eff;
 
-    // 5-7. Core desaturation & single-exit output assembly
-    float3 highlight_bg = make_float3(0.336043f, 0.336043f, 0.336043f);
+    // 5-7. Core desaturation & output assembly
     float3 out_di = in_di;
-
     if (desat_amount > 0.0f) {
-        float3 gray_lin = make_float3(Y_safe, Y_safe, Y_safe);
-        float3 out_lin_linear = lerp3(lin, gray_lin, desat_amount);
+        float sat_scale = 1.0f - desat_amount;
+        float Y_pos = 0.23694990f * lin_pos.x + 0.75517334f * lin_pos.y + 0.00787676f * lin_pos.z;
+        float3 gray_lin = make_float3(Y_pos, Y_pos, Y_pos);
 
-        float3 out_lin = out_lin_linear;
+        float3 out_pos = lerp3(lin_pos, gray_lin, desat_amount);
         if (desat_engine == ENGINE_OKLAB) {
-            float sat_scale = 1.0f - desat_amount;
             float3 lab_desat = make_float3(lab.x, lab.y * sat_scale, lab.z * sat_scale);
             float3 lms_cbrt_desat = lab_to_lms_cbrt(lab_desat);
             float3 lms_desat = cube3(lms_cbrt_desat);
-            float3 out_lin_oklab = lms_to_dwg_lin(lms_desat);
-            out_lin = lerp3(out_lin_linear, out_lin_oklab, oklab_valid);
+            out_pos = lms_safe_to_dwg_lin(lms_desat);
+            out_pos = make_float3(_fmaxf(out_pos.x, 0.0f), _fmaxf(out_pos.y, 0.0f), _fmaxf(out_pos.z, 0.0f));
         }
 
+        // Converge negative excursions toward their 3-channel mean so sub-black neutral grays stay invariant
+        float neg_mean = (lin_neg.x + lin_neg.y + lin_neg.z) * (1.0f / 3.0f);
+        float3 out_neg = lerp3(lin_neg, make_float3(neg_mean, neg_mean, neg_mean), desat_amount);
+        float3 out_lin = add3(out_pos, out_neg);
+
         // Chroma-coupled density / HK compensation (strictly zero on neutral grays)
-        float rel_chroma_oklab = (lab.x > 1e-5f) ? (C_lab / lab.x) : 0.0f;
-        float3 diff_lin = sub3(lin, gray_lin);
-        float rel_chroma_lin = _sqrtf(diff_lin.x * diff_lin.x + diff_lin.y * diff_lin.y + diff_lin.z * diff_lin.z) / (Y_safe + 1e-5f);
-        float rc = rel_chroma_lin + (rel_chroma_oklab - rel_chroma_lin) * oklab_valid;
-        float chroma_factor = rc / (rc + 0.25f);
-        float density_gain = _exp2f(chroma_density * chroma_factor * desat_amount * 2.0f);
-        out_lin = scale3(out_lin, density_gain);
+        if (_fabs(cd_val) > 1e-6f) {
+            float C_lab = sqrtf_safe(C_sq);
+            float rc = (lab.x > 1e-5f) ? (C_lab / lab.x) : 0.0f;
+            float chroma_factor = rc / (rc + 0.25f);
+            float cd_scale = (cd_val > 0.0f) ? 1.2f : 2.0f;
+            float density_gain = _exp2f(cd_val * chroma_factor * desat_amount * cd_scale);
+            out_lin = scale3(out_lin, density_gain);
+        }
 
         out_di = linear_to_di3(out_lin);
     }
 
-    float3 out = out_di;
     if (preview_mode == PREVIEW_HIGHLIGHT) {
-        out = lerp3(highlight_bg, out_di, w_eff);
-    } else if (preview_mode == PREVIEW_MASK) {
-        out = make_float3(desat_amount, desat_amount, desat_amount);
-    } else if (preview_mode == PREVIEW_DELTA) {
-        out = make_float3(
-            4.0f * _fabs(out_di.x - in_di.x),
-            4.0f * _fabs(out_di.y - in_di.y),
-            4.0f * _fabs(out_di.z - in_di.z)
-        );
+        return lerp3(highlight_bg, out_di, w_eff);
     }
-    return out;
+    if (preview_mode == PREVIEW_MASK) {
+        float mask_di = linear_to_di(powf_pos(clampf(desat_amount, 0.0f, 1.0f), 2.4f));
+        return make_float3(mask_di, mask_di, mask_di);
+    }
+    if (preview_mode == PREVIEW_DELTA) {
+        float dr = linear_to_di(powf_pos(clampf(4.0f * _fabs(out_di.x - in_di.x), 0.0f, 1.0f), 2.4f));
+        float dg = linear_to_di(powf_pos(clampf(4.0f * _fabs(out_di.y - in_di.y), 0.0f, 1.0f), 2.4f));
+        float db = linear_to_di(powf_pos(clampf(4.0f * _fabs(out_di.z - in_di.z), 0.0f, 1.0f), 2.4f));
+        return make_float3(dr, dg, db);
+    }
+    return out_di;
 }

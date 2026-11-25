@@ -6,8 +6,11 @@ for side-by-side comparison of shadow desaturation tools in DaVinci Resolve (fol
 import os
 import struct
 import zlib
+from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+
+ROOT_DIR = Path(__file__).resolve().parent.parent
 
 # Official DaVinci Intermediate constants (matching DWG_Shadow_Desat.dctl)
 DI_A = 0.0075
@@ -88,9 +91,18 @@ def make_equal_luma_color_709(hue_rgb709: np.ndarray, y_target: np.ndarray, sat_
 
 def load_font(size: int):
     candidates = [
+        # macOS (Apple Silicon / Intel)
+        "/System/Library/Fonts/Menlo.ttc",
+        "/System/Library/Fonts/SFNSMono.ttf",
+        "/Library/Fonts/Arial.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        # Windows
         r"C:\Windows\Fonts\consolab.ttf",
         r"C:\Windows\Fonts\segoeui.ttf",
         r"C:\Windows\Fonts\arial.ttf",
+        # Linux
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
     ]
     for path in candidates:
         if os.path.exists(path):
@@ -449,9 +461,8 @@ def build_test_chart():
     canvas_clipped = np.clip(canvas, 0.0, 1.0)
     rgb_u16 = np.round(canvas_clipped * 65535.0).astype(np.uint16)
 
-    out_dir = r"C:\Users\MCI-X1\Documents\李健鸿\Dctl开发"
-    out_png = os.path.join(out_dir, "DWG_DI_Shadow_Desat_TestChart_16bit.png")
-    preview_png = os.path.join(out_dir, "tests", "preview_rec709.png")
+    out_png = str(ROOT_DIR / "DWG_DI_Shadow_Desat_TestChart_16bit.png")
+    preview_png = str(ROOT_DIR / "tests" / "preview_rec709.png")
 
     write_png_16bit_rgb(out_png, rgb_u16)
 

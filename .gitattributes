@@ -1,0 +1,6 @@
+*.dctl text eol=lf
+*.py text eol=lf
+*.svg text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.png binary
